@@ -1,8 +1,38 @@
-import React, { useState, useEffect } from "react";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import DateTimePicker from "@react-native-community/datetimepicker";
+import React, { useState, useEffect, useRef } from "react";
 import * as Notifications from "expo-notifications";
+import Header from "./components/Header";
+import StatsCards from "./components/StatsCards";
+import TaskCard from "./components/TaskCard";
+import AddTaskModal from "./components/AddTaskModal";
+import NotificationSettings from "./components/NotificationSettings";
+import NotificationHistory from "./components/NotificationHistory";
+import BottomNavigation from "./components/BottomNavigation";
+import { saveTasks, loadTasks } from "./utils/storage";
+import { sortTasks } from "./utils/taskHelpers";
+import { calculateTaskStats } from "./utils/taskStats";
+import ProfileScreen from "./screens/ProfileScreen";
+import {
+  getTasks,
+  createTask,
+  updateTask as updateTaskAPI,
+  deleteTask as deleteTaskAPI,
+  getTaskStats,
+} from "./utils/taskService";
 
+import {
+  requestNotificationPermission,
+  cancelTaskReminder,
+  getScheduledTaskReminders,
+  sendTestNotification as sendTestNotificationService,
+} from "./utils/notificationService";
+import {
+  loadNotificationSettings,
+  saveNotificationSettings,
+} from "./utils/notificationSettingsStorage";
+import {
+  loadNotificationHistory,
+  saveNotificationHistory,
+} from "./utils/notificationStorage";
 import {
   View,
   Text,
@@ -16,8 +46,25 @@ import {
 } from "react-native";
 
 import { StatusBar } from "expo-status-bar";
-
+import LoginScreen from "./screens/LoginScreen";
+import RegisterScreen from "./screens/RegisterScreen";
+import {
+  checkAuthStatus,
+  logoutUser,
+  updateProfile,
+  changePassword,
+} from "./utils/authService";
 export default function App() {
+  const scrollViewRef = useRef(null);
+  const [taskStats, setTaskStats] = useState({
+    totalTasks: 0,
+    completedTasks: 0,
+    pendingTasks: 0,
+    overdueTasks: 0,
+  });
+  const [tasksSectionY, setTasksSectionY] = useState(0);
+  const [showRegister, setShowRegister] = useState(false);
+  const [activeTab, setActiveTab] = useState("Home");
   const [isLoaded, setIsLoaded] = useState(false);
   // Task data
   const [tasks, setTasks] = useState([
@@ -48,15 +95,19 @@ export default function App() {
   // Modal state
   const [showNotificationSettings, setShowNotificationSettings] =
     useState(false);
-
+  const [showProfile, setShowProfile] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
-
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [backendTasksLoading, setBackendTasksLoading] = useState(false);
   const [vibrationEnabled, setVibrationEnabled] = useState(true);
   const [notificationHistory, setNotificationHistory] = useState([]);
   const [modalVisible, setModalVisible] = useState(false);
   const [searchText, setSearchText] = useState("");
   const [filterStatus, setFilterStatus] = useState("All");
   const [filterPriority, setFilterPriority] = useState("All");
+  const [sortBy, setSortBy] = useState("Due Date");
   // Input state
   const [taskTitle, setTaskTitle] = useState("");
   const [priority, setPriority] = useState("Medium");
@@ -69,69 +120,30 @@ export default function App() {
   });
 
   const [showTimePicker, setShowTimePicker] = useState(false);
-  const completedTasks = tasks.filter((task) => task.completed).length;
+
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [historyLoaded, setHistoryLoaded] = useState(false);
-const [showHistory, setShowHistory] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const [notificationSettingsLoaded, setNotificationSettingsLoaded] =
     useState(false);
-  const pendingTasks = tasks.length - completedTasks;
-  const requestNotificationPermission = async () => {
-    const { status: existingStatus } =
-      await Notifications.getPermissionsAsync();
+  const { totalTasks, completedTasks, pendingTasks, progressPercentage } =
+    calculateTaskStats(tasks);
+  const sendTestNotification = async () => {
+    const success = await sendTestNotificationService();
 
-    let finalStatus = existingStatus;
-
-    if (existingStatus !== "granted") {
-      const { status } = await Notifications.requestPermissionsAsync();
-
-      finalStatus = status;
-    }
-
-    if (finalStatus !== "granted") {
+    if (success) {
+      Alert.alert("Success", "Test notification scheduled!");
+    } else {
       Alert.alert(
-        "Permission Required",
-        "Please allow notifications to receive task reminders.",
+        "Notification Error",
+        "Unable to send test notification. Please check permission.",
       );
-      return false;
     }
-
-    return true;
   };
-
-
-
-
-const sendTestNotification = async () => {
-  try {
-    const hasPermission = await requestNotificationPermission();
-    if (!hasPermission) return;
-
-    await Notifications.scheduleNotificationAsync({
-      content: {
-        title: "TaskFlow Test 🔔",
-        body: "Testing notification without custom channel",
-        sound: "default",
-      },
-      trigger: {
-        type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
-        seconds: 5,
-      },
-    });
-
-    Alert.alert("Success", "Test notification scheduled!");
-  } catch (error) {
-    console.log("Test Notification Error:", error);
-    Alert.alert("Notification Error", error.message);
-  }
-};
-
-
 
   const checkScheduledNotifications = async () => {
     try {
-      const notifications =
-        await Notifications.getAllScheduledNotificationsAsync();
+      const notifications = await getScheduledTaskReminders();
 
       if (notifications.length === 0) {
         Alert.alert("Scheduled Notifications", "No notifications scheduled.");
@@ -153,50 +165,47 @@ const sendTestNotification = async () => {
     }
   };
 
-const checkNotificationChannels = async () => {
-  try {
-    const channels =
-      await Notifications.getNotificationChannelsAsync();
+  const checkNotificationChannels = async () => {
+    try {
+      const channels = await Notifications.getNotificationChannelsAsync();
 
-    console.log("Notification Channels:", channels);
+      console.log("Notification Channels:", channels);
 
-    Alert.alert(
-      "Channel Information",
-      JSON.stringify(channels, null, 2).slice(0, 2500)
-    );
-  } catch (error) {
-    console.log("Channel Check Error:", error);
-    Alert.alert("Error", error.message);
-  }
-};
+      Alert.alert(
+        "Channel Information",
+        JSON.stringify(channels, null, 2).slice(0, 2500),
+      );
+    } catch (error) {
+      console.log("Channel Check Error:", error);
+      Alert.alert("Error", error.message);
+    }
+  };
 
   // Add task
 
+  const scheduleTaskReminder = async (
+    task,
+    force = false,
+    soundOverride = soundEnabled,
+    vibrationOverride = vibrationEnabled,
+  ) => {
+    try {
+      if (!notificationsEnabled && !force) return null;
+      if (!task.dueDate || task.completed) return null;
 
-const scheduleTaskReminder = async (
-  task,
-  force = false,
-  soundOverride = soundEnabled,
-  vibrationOverride = vibrationEnabled
-) => {
-  try {
-    if (!notificationsEnabled && !force) return null;
-    if (!task.dueDate || task.completed) return null;
+      const reminderDate = new Date(task.dueDate);
 
-    const reminderDate = new Date(task.dueDate);
+      if (
+        isNaN(reminderDate.getTime()) ||
+        reminderDate.getTime() <= Date.now()
+      ) {
+        return null;
+      }
 
-    if (
-      isNaN(reminderDate.getTime()) ||
-      reminderDate.getTime() <= Date.now()
-    ) {
-      return null;
-    }
+      const hasPermission = await requestNotificationPermission();
+      if (!hasPermission) return null;
 
-    const hasPermission = await requestNotificationPermission();
-    if (!hasPermission) return null;
-
-    const notificationId =
-      await Notifications.scheduleNotificationAsync({
+      const notificationId = await Notifications.scheduleNotificationAsync({
         content: {
           title: "TaskFlow Reminder 🔔",
           body: `Reminder: ${task.title}`,
@@ -209,71 +218,56 @@ const scheduleTaskReminder = async (
         },
       });
 
-    console.log("Task reminder scheduled:", notificationId);
-    console.log("Reminder Date:", reminderDate.toString());
-console.log("Current Time:", new Date().toString());
+      console.log("Task reminder scheduled:", notificationId);
 
-const pendingNotifications =
-  await Notifications.getAllScheduledNotificationsAsync();
+      const pendingNotifications =
+        await Notifications.getAllScheduledNotificationsAsync();
 
-console.log("All Pending Notifications:", pendingNotifications);
-    return notificationId;
-  } catch (error) {
-    console.log("Task Reminder Error:", error);
-    Alert.alert("Reminder Error", error.message);
-    return null;
-  }
-};
-
-
-
-const updateSoundVibrationSettings = async (
-  newSound,
-  newVibration
-) => {
-  try {
-    // Save new settings
-    setSoundEnabled(newSound);
-    setVibrationEnabled(newVibration);
-
-    // Cancel existing pending task reminders
-    for (const task of tasks) {
-      if (task.notificationId) {
-        await Notifications.cancelScheduledNotificationAsync(
-          task.notificationId
-        );
-      }
+      return notificationId;
+    } catch (error) {
+      console.log("Task Reminder Error:", error);
+      Alert.alert("Reminder Error", error.message);
+      return null;
     }
+  };
 
-    // Reschedule pending tasks using new settings
-    const updatedTasks = await Promise.all(
-      tasks.map(async (task) => {
-        if (task.completed || !task.dueDate || !notificationsEnabled) {
-          return { ...task, notificationId: null };
+  const updateSoundVibrationSettings = async (newSound, newVibration) => {
+    try {
+      // Save new settings
+      setSoundEnabled(newSound);
+      setVibrationEnabled(newVibration);
+
+      // Cancel existing pending task reminders
+      for (const task of tasks) {
+        if (task.notificationId) {
+          await cancelTaskReminder(task.notificationId);
         }
+      }
 
-        const notificationId = await scheduleTaskReminder(
-          task,
-          true,
-          newSound,
-          newVibration
-        );
+      // Reschedule pending tasks using new settings
+      const updatedTasks = await Promise.all(
+        tasks.map(async (task) => {
+          if (task.completed || !task.dueDate || !notificationsEnabled) {
+            return { ...task, notificationId: null };
+          }
 
-        return { ...task, notificationId };
-      })
-    );
+          const notificationId = await scheduleTaskReminder(
+            task,
+            true,
+            newSound,
+            newVibration,
+          );
 
-    setTasks(updatedTasks);
+          return { ...task, notificationId };
+        }),
+      );
 
-    Alert.alert(
-      "Settings Updated",
-      "Task reminders have been updated with your new sound and vibration settings."
-    );
-  } catch (error) {
-    console.log("Settings Update Error:", error);
-    Alert.alert("Error", error.message);
-  }
-};
+      setTasks(updatedTasks);
+    } catch (error) {
+      console.log("Settings Update Error:", error);
+      Alert.alert("Error", error.message);
+    }
+  };
 
   const addTask = async () => {
     if (taskTitle.trim() === "") {
@@ -281,60 +275,74 @@ const updateSoundVibrationSettings = async (
       return;
     }
 
-    // Combine selected date and selected time
+    // Combine selected date and time
     const reminderDate = new Date(selectedDate);
 
-  console.log("Selected Time:", selectedTime.toString());
-console.log("Selected Hour:", selectedTime.getHours());
-console.log("Selected Minute:", selectedTime.getMinutes());
+    reminderDate.setHours(
+      selectedTime.getHours(),
+      selectedTime.getMinutes(),
+      0,
+      0,
+    );
 
-reminderDate.setHours(
-  selectedTime.getHours(),
-  selectedTime.getMinutes(),
-  0,
-  0
-);
-
-console.log("Final Reminder Date:", reminderDate.toString());
+    console.log("Final Reminder Date:", reminderDate.toString());
 
     if (reminderDate <= new Date()) {
       Alert.alert("Invalid Reminder", "Please select a future date and time.");
       return;
     }
 
-    const newTask = {
-      id: Date.now().toString(),
-      title: taskTitle.trim(),
+    try {
+      // Step 1: Save task in MongoDB
+      const response = await createTask({
+        title: taskTitle.trim(),
+        description: "",
+        priority: priority,
+        dueDate: reminderDate.toISOString(),
+      });
 
-      // Display selected reminder time, not current time
-      time: reminderDate.toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
+      const savedTask = response.task;
 
-      priority: priority,
-      completed: false,
-      dueDate: reminderDate.toISOString(),
-    };
+      // Step 2: Format MongoDB task
+      const newTask = {
+        ...savedTask,
+        id: savedTask._id,
+        time: reminderDate.toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+        notificationId: null,
+      };
 
-    const notificationId = await scheduleTaskReminder(newTask);
+      // Step 3: Schedule local notification
+      const notificationId = await scheduleTaskReminder(newTask);
 
-    const taskWithReminder = {
-      ...newTask,
-      notificationId,
-    };
+      const taskWithReminder = {
+        ...newTask,
+        notificationId,
+      };
 
-    setTasks((previousTasks) => [...previousTasks, taskWithReminder]);
+      // Step 4: Update Dashboard
+      setTasks((previousTasks) => [...previousTasks, taskWithReminder]);
 
-    setTaskTitle("");
-    setPriority("Medium");
-    setSelectedDate(new Date());
+      await fetchTaskStats();
+      console.log("Task Saved in MongoDB:", savedTask);
 
-    const nextHour = new Date();
-    nextHour.setHours(nextHour.getHours() + 1, 0, 0, 0);
-    setSelectedTime(nextHour);
+      // Step 5: Reset form
+      setTaskTitle("");
+      setPriority("Medium");
+      setSelectedDate(new Date());
 
-    setModalVisible(false);
+      const nextHour = new Date();
+      nextHour.setHours(nextHour.getHours() + 1, 0, 0, 0);
+      setSelectedTime(nextHour);
+
+      setModalVisible(false);
+    } catch (error) {
+      console.log("Create Task Error:", error.response?.data || error.message);
+
+      Alert.alert("Error", "Task could not be saved. Please try again.");
+    }
   };
 
   // Complete / Incomplete task
@@ -347,29 +355,48 @@ console.log("Final Reminder Date:", reminderDate.toString());
 
     let notificationId = selectedTask.notificationId || null;
 
-    if (willComplete) {
-      // Cancel reminder when task is completed
-      if (notificationId) {
-        await Notifications.cancelScheduledNotificationAsync(notificationId);
+    try {
+      // Step 1: Update task in MongoDB
+      const response = await updateTaskAPI(id, {
+        completed: willComplete,
+        completedAt: willComplete ? new Date().toISOString() : null,
+      });
+
+      console.log("MongoDB Update Response:", response);
+
+      // Step 2: Handle notifications
+      if (willComplete) {
+        if (notificationId) {
+          await cancelTaskReminder(notificationId);
+        }
+
+        notificationId = null;
+      } else {
+        notificationId = await scheduleTaskReminder(selectedTask);
       }
 
-      notificationId = null;
-    } else {
-      // Schedule reminder again when task becomes pending
-      notificationId = await scheduleTaskReminder(selectedTask);
-    }
+      // Step 3: Update Dashboard
+      setTasks((previousTasks) =>
+        previousTasks.map((task) =>
+          task.id === id
+            ? {
+                ...task,
+                completed: willComplete,
+                completedAt: willComplete ? new Date().toISOString() : null,
+                notificationId: notificationId,
+              }
+            : task,
+        ),
+      );
 
-    setTasks((previousTasks) =>
-      previousTasks.map((task) =>
-        task.id === id
-          ? {
-              ...task,
-              completed: willComplete,
-              notificationId: notificationId,
-            }
-          : task,
-      ),
-    );
+      await fetchTaskStats();
+
+      console.log("Task Status Updated in MongoDB:", id);
+    } catch (error) {
+      console.log("Toggle Task Error:", error.response?.data || error.message);
+
+      Alert.alert("Error", "Unable to update task status.");
+    }
   };
 
   // Delete task
@@ -385,20 +412,39 @@ console.log("Final Reminder Date:", reminderDate.toString());
         onPress: async () => {
           const taskToDelete = tasks.find((task) => task.id === id);
 
-          if (taskToDelete?.notificationId) {
-            await Notifications.cancelScheduledNotificationAsync(
-              taskToDelete.notificationId,
-            );
-          }
+          if (!taskToDelete) return;
 
-          setTasks((previousTasks) =>
-            previousTasks.filter((task) => task.id !== id),
-          );
+          try {
+            // Step 1: Delete task from MongoDB
+            const response = await deleteTaskAPI(id);
+
+            console.log("MongoDB Delete Response:", response);
+
+            // Step 2: Cancel task reminder
+            if (taskToDelete.notificationId) {
+              await cancelTaskReminder(taskToDelete.notificationId);
+            }
+
+            // Step 3: Remove task from Dashboard
+            setTasks((previousTasks) =>
+              previousTasks.filter((task) => task.id !== id),
+            );
+
+            await fetchTaskStats();
+
+            console.log("Task Deleted from MongoDB:", id);
+          } catch (error) {
+            console.log(
+              "Delete Task Error:",
+              error.response?.data || error.message,
+            );
+
+            Alert.alert("Error", "Unable to delete task. Please try again.");
+          }
         },
       },
     ]);
   };
-
   const editTask = (id) => {
     const selectedTask = tasks.find((task) => task.id === id);
 
@@ -452,71 +498,97 @@ console.log("Final Reminder Date:", reminderDate.toString());
       return;
     }
 
-    // Cancel old reminder
-    if (existingTask.notificationId) {
-      await Notifications.cancelScheduledNotificationAsync(
-        existingTask.notificationId,
+    try {
+      // Step 1: Update task in MongoDB
+      const response = await updateTaskAPI(editingTaskId, {
+        title: taskTitle.trim(),
+        priority: priority,
+        dueDate: reminderDate.toISOString(),
+      });
+
+      console.log("MongoDB Edit Response:", response);
+
+      // Step 2: Cancel old reminder
+      if (existingTask.notificationId) {
+        await cancelTaskReminder(existingTask.notificationId);
+      }
+
+      const updatedTask = {
+        ...existingTask,
+        ...response.task,
+        id: response.task._id,
+        title: response.task.title,
+        priority: response.task.priority,
+        dueDate: response.task.dueDate,
+        time: reminderDate.toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+        notificationId: null,
+      };
+
+      // Step 3: Schedule new reminder for pending task
+      const notificationId = existingTask.completed
+        ? null
+        : await scheduleTaskReminder(updatedTask);
+
+      // Step 4: Update Dashboard
+      setTasks((previousTasks) =>
+        previousTasks.map((task) =>
+          task.id === editingTaskId ? { ...updatedTask, notificationId } : task,
+        ),
       );
+
+      await fetchTaskStats();
+
+      // Step 5: Reset form
+      setTaskTitle("");
+      setPriority("Medium");
+      setEditingTaskId(null);
+      setSelectedDate(new Date());
+
+      const nextHour = new Date();
+      nextHour.setHours(nextHour.getHours() + 1, 0, 0, 0);
+      setSelectedTime(nextHour);
+
+      setModalVisible(false);
+
+      console.log("Task Updated Successfully in MongoDB");
+    } catch (error) {
+      console.log("Update Task Error:", error.response?.data || error.message);
+
+      Alert.alert("Error", "Unable to update task. Please try again.");
     }
-
-    const updatedTask = {
-      ...existingTask,
-      title: taskTitle.trim(),
-      priority: priority,
-      dueDate: reminderDate.toISOString(),
-      time: reminderDate.toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
-      notificationId: null,
-    };
-
-    // Schedule new reminder for pending task
-    const notificationId = existingTask.completed
-      ? null
-      : await scheduleTaskReminder(updatedTask);
-
-    setTasks((previousTasks) =>
-      previousTasks.map((task) =>
-        task.id === editingTaskId ? { ...updatedTask, notificationId } : task,
-      ),
-    );
-
-    setTaskTitle("");
-    setPriority("Medium");
-    setEditingTaskId(null);
-    setSelectedDate(new Date());
-
-    const nextHour = new Date();
-    nextHour.setHours(nextHour.getHours() + 1, 0, 0, 0);
-    setSelectedTime(nextHour);
-
-    setModalVisible(false);
   };
+  // Fetch Task Statistics from MongoDB
+  const fetchTaskStats = async () => {
+    console.log("getTaskStats type:", typeof getTaskStats);
 
-  const filteredTasks = tasks.filter((task) => {
-    const matchesSearch = task.title
-      .toLowerCase()
-      .includes(searchText.toLowerCase());
+    try {
+      const response = await getTaskStats();
 
-    const matchesStatus =
-      filterStatus === "All" ||
-      (filterStatus === "Completed" && task.completed) ||
-      (filterStatus === "Pending" && !task.completed);
+      console.log("Statistics API Response:", response);
 
-    const matchesPriority =
-      filterPriority === "All" || task.priority === filterPriority;
+      console.log("Overdue Tasks Count:", response.stats.overdueTasks);
 
-    return matchesSearch && matchesStatus && matchesPriority;
-  });
+      setTaskStats({
+        totalTasks: response.stats.totalTasks ?? 0,
+        completedTasks: response.stats.completedTasks ?? 0,
+        pendingTasks: response.stats.pendingTasks ?? 0,
+        overdueTasks: response.stats.overdueTasks ?? 0,
+      });
+    } catch (error) {
+      console.log("Statistics Error:", error);
+      console.log("Error Message:", error.message);
+    }
+  };
+  const sortedTasks = sortTasks(tasks, sortBy);
   const toggleNotificationSettings = async () => {
     if (notificationsEnabled) {
       // Turn OFF
       for (const task of tasks) {
         if (task.notificationId) {
-          await Notifications.cancelScheduledNotificationAsync(
-            task.notificationId,
-          );
+          await cancelTaskReminder(task.notificationId);
         }
       }
 
@@ -543,7 +615,7 @@ console.log("Final Reminder Date:", reminderDate.toString());
             return { ...task, notificationId: null };
           }
 
-         const notificationId = await scheduleTaskReminder(task, true);
+          const notificationId = await scheduleTaskReminder(task, true);
 
           return {
             ...task,
@@ -569,38 +641,30 @@ console.log("Final Reminder Date:", reminderDate.toString());
     }
   };
 
+  const handleTimeChange = (event, time) => {
+    setShowTimePicker(false);
 
-const handleTimeChange = (event, time) => {
-  setShowTimePicker(false);
+    if (event?.type === "set" && time) {
+      setSelectedTime((previousTime) => {
+        const updatedTime = new Date(previousTime);
 
-  if (event?.type === "set" && time) {
-    setSelectedTime((previousTime) => {
-      const updatedTime = new Date(previousTime);
+        updatedTime.setHours(time.getHours(), time.getMinutes(), 0, 0);
 
-      updatedTime.setHours(
-        time.getHours(),
-        time.getMinutes(),
-        0,
-        0
-      );
+        console.log("Picker selected hour:", time.getHours());
+        console.log("Saved selected hour:", updatedTime.getHours());
 
-      console.log("Picker selected hour:", time.getHours());
-      console.log("Saved selected hour:", updatedTime.getHours());
+        return updatedTime;
+      });
+    }
+  };
 
-      return updatedTime;
-    });
-  }
-};
-
-
-  // Load tasks from storage
   useEffect(() => {
-    const loadTasks = async () => {
+    const getTasks = async () => {
       try {
-        const savedTasks = await AsyncStorage.getItem("tasks");
+        const savedTasks = await loadTasks();
 
         if (savedTasks !== null) {
-          setTasks(JSON.parse(savedTasks));
+          setTasks(savedTasks);
         }
       } catch (error) {
         console.log("Load Error:", error);
@@ -609,246 +673,432 @@ const handleTimeChange = (event, time) => {
       }
     };
 
-    loadTasks();
+    getTasks();
   }, []);
 
   // Save tasks whenever they change
   useEffect(() => {
     if (!isLoaded) return;
 
-    const saveTasks = async () => {
-      try {
-        await AsyncStorage.setItem("tasks", JSON.stringify(tasks));
-      } catch (error) {
-        console.log("Save Error:", error);
-      }
-    };
-
-    saveTasks();
+    saveTasks(tasks);
   }, [tasks, isLoaded]);
   // Load notification setting
-useEffect(() => {
-  const loadNotificationSettings = async () => {
-    try {
-      const notifications = await AsyncStorage.getItem("notificationsEnabled");
-      const sound = await AsyncStorage.getItem("soundEnabled");
-      const vibration = await AsyncStorage.getItem("vibrationEnabled");
+  useEffect(() => {
+    const getSettings = async () => {
+      try {
+        const settings = await loadNotificationSettings();
 
-      if (notifications !== null) {
-        setNotificationsEnabled(notifications === "true");
-      }
-
-      if (sound !== null) {
-        setSoundEnabled(sound === "true");
-      }
-
-      if (vibration !== null) {
-        setVibrationEnabled(vibration === "true");
-      }
-    } catch (error) {
-      console.log("Settings load error:", error);
-    } finally {
-      setNotificationSettingsLoaded(true);
-    }
-  };
-
-  loadNotificationSettings();
-}, []);
-// Load notification history
-useEffect(() => {
-  const loadNotificationHistory = async () => {
-    try {
-      const savedHistory =
-        await AsyncStorage.getItem("notificationHistory");
-
-      if (savedHistory !== null) {
-        setNotificationHistory(JSON.parse(savedHistory));
-      }
-    } catch (error) {
-      console.log("History Load Error:", error);
-    } finally {
-      setHistoryLoaded(true);
-    }
-  };
-
-  loadNotificationHistory();
-}, []);
-
-// Save notification history
-useEffect(() => {
-  if (!historyLoaded) return;
-
-  AsyncStorage.setItem(
-    "notificationHistory",
-    JSON.stringify(notificationHistory)
-  ).catch((error) => {
-    console.log("History Save Error:", error);
-  });
-}, [notificationHistory, historyLoaded]);
-  // Save notification setting
-useEffect(() => {
-  if (!notificationSettingsLoaded) return;
-
-  const saveSettings = async () => {
-    try {
-      await AsyncStorage.multiSet([
-        ["notificationsEnabled", String(notificationsEnabled)],
-        ["soundEnabled", String(soundEnabled)],
-        ["vibrationEnabled", String(vibrationEnabled)],
-      ]);
-    } catch (error) {
-      console.log("Notification settings save error:", error);
-    }
-  };
-
-  saveSettings();
-}, [
-  notificationsEnabled,
-  soundEnabled,
-  vibrationEnabled,
-  notificationSettingsLoaded,
-]);
-// Listen for received notifications
-
-useEffect(() => {
-  const subscription =
-    Notifications.addNotificationResponseReceivedListener(
-      (response) => {
-        console.log("NOTIFICATION TAPPED:", response);
-
-        const content = response.notification.request.content;
-
-        const historyItem = {
-          id: response.notification.request.identifier,
-          title: content.title || "TaskFlow Reminder",
-          body: content.body || "",
-          taskId: content.data?.taskId || null,
-          receivedAt: new Date().toISOString(),
-        };
-
-        setNotificationHistory((previousHistory) => {
-          if (previousHistory.some((item) => item.id === historyItem.id)) {
-            return previousHistory;
+        if (settings !== null) {
+          if (settings.notificationsEnabled !== null) {
+            setNotificationsEnabled(settings.notificationsEnabled);
           }
 
-          return [historyItem, ...previousHistory].slice(0, 100);
-        });
+          if (settings.soundEnabled !== null) {
+            setSoundEnabled(settings.soundEnabled);
+          }
+
+          if (settings.vibrationEnabled !== null) {
+            setVibrationEnabled(settings.vibrationEnabled);
+          }
+        }
+      } finally {
+        setNotificationSettingsLoaded(true);
       }
-    );
-
-  return () => subscription.remove();
-}, []);
-
-
-
-useEffect(() => {
-  const saveNotificationToHistory = (response) => {
-    if (!response) return;
-
-    const notification = response.notification;
-    const content = notification.request.content;
-
-    const historyItem = {
-      id: notification.request.identifier,
-      title: content.title || "TaskFlow Reminder",
-      body: content.body || "",
-      taskId: content.data?.taskId || null,
-      receivedAt: new Date().toISOString(),
     };
 
-    setNotificationHistory((previousHistory) => {
-      if (
-        previousHistory.some(
-          (item) => item.id === historyItem.id
-        )
-      ) {
-        return previousHistory;
+    getSettings();
+  }, []);
+  // Load notification history
+
+  useEffect(() => {
+    const getNotificationHistory = async () => {
+      try {
+        const savedHistory = await loadNotificationHistory();
+
+        if (savedHistory !== null) {
+          setNotificationHistory(savedHistory);
+        }
+      } finally {
+        setHistoryLoaded(true);
       }
+    };
 
-      return [historyItem, ...previousHistory].slice(0, 100);
-    });
-  };
+    getNotificationHistory();
+  }, []);
 
-  const subscription =
-    Notifications.addNotificationResponseReceivedListener(
-      saveNotificationToHistory
+  // Save notification history
+  useEffect(() => {
+    if (!historyLoaded) return;
+
+    saveNotificationHistory(notificationHistory);
+  }, [notificationHistory, historyLoaded]);
+  // Save notification setting
+  useEffect(() => {
+    if (!notificationSettingsLoaded) return;
+
+    saveNotificationSettings(
+      notificationsEnabled,
+      soundEnabled,
+      vibrationEnabled,
+    );
+  }, [
+    notificationsEnabled,
+    soundEnabled,
+    vibrationEnabled,
+    notificationSettingsLoaded,
+  ]);
+  // Listen for received notifications
+
+  useEffect(() => {
+    const saveNotificationToHistory = (response) => {
+      if (!response) return;
+
+      const notification = response.notification;
+      const content = notification.request.content;
+
+      const historyItem = {
+        id: notification.request.identifier,
+        title: content.title || "TaskFlow Reminder",
+        body: content.body || "",
+        taskId: content.data?.taskId || null,
+        receivedAt: new Date().toISOString(),
+      };
+
+      setNotificationHistory((previousHistory) => {
+        if (previousHistory.some((item) => item.id === historyItem.id)) {
+          return previousHistory;
+        }
+
+        return [historyItem, ...previousHistory].slice(0, 100);
+      });
+    };
+
+    const subscription = Notifications.addNotificationResponseReceivedListener(
+      saveNotificationToHistory,
     );
 
-  return () => subscription.remove();
-}, []);
+    return () => subscription.remove();
+  }, []);
 
+  useEffect(() => {
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowBanner: true,
+        shouldShowList: true,
+        shouldPlaySound: soundEnabled,
+        shouldSetBadge: false,
+      }),
+    });
+  }, [soundEnabled]);
 
-useEffect(() => {
-  Notifications.setNotificationHandler({
-    handleNotification: async () => ({
-      shouldShowBanner: true,
-      shouldShowList: true,
-      shouldPlaySound: soundEnabled,
-      shouldSetBadge: false,
-    }),
-  });
-}, [soundEnabled]);
-  if (!isLoaded) {
+  useEffect(() => {
+    const verifyAuthentication = async () => {
+      try {
+        const result = await checkAuthStatus();
+
+        setIsAuthenticated(result.isAuthenticated);
+        setCurrentUser(result.user);
+
+        console.log("Authentication Status:", result.isAuthenticated);
+      } catch (error) {
+        console.log("Authentication Error:", error.message);
+        setIsAuthenticated(false);
+        setCurrentUser(null);
+      } finally {
+        setAuthLoading(false);
+      }
+    };
+
+    verifyAuthentication();
+  }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    let isActive = true;
+
+    const fetchBackendTasks = async () => {
+      try {
+        setBackendTasksLoading(true);
+
+        // Backend API ke liye filters prepare karo
+        const filters = {};
+
+        if (searchText.trim()) {
+          filters.search = searchText.trim();
+        }
+
+        if (filterPriority !== "All") {
+          filters.priority = filterPriority;
+        }
+
+        if (filterStatus !== "All") {
+          filters.status = filterStatus.toLowerCase();
+        }
+
+        // Backend se filtered tasks fetch karo
+        const response = await getTasks(filters);
+
+        const formattedTasks = response.tasks.map((task) => ({
+          ...task,
+          id: task._id,
+          time: task.dueDate
+            ? new Date(task.dueDate).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })
+            : "",
+          notificationId: null,
+        }));
+
+        if (isActive) {
+          setTasks(formattedTasks);
+          console.log("Filtered Tasks Loaded:", formattedTasks);
+        }
+      } catch (error) {
+        console.log(
+          "Fetch Backend Tasks Error:",
+          error.response?.data || error.message,
+        );
+      } finally {
+        if (isActive) {
+          setBackendTasksLoading(false);
+        }
+      }
+    };
+
+    // Search typing rukne ke 500ms baad API call hogi
+    const timer = setTimeout(() => {
+      fetchBackendTasks();
+    }, 500);
+
+    return () => {
+      isActive = false;
+      clearTimeout(timer);
+    };
+  }, [isAuthenticated, searchText, filterStatus, filterPriority]);
+
+  // Load Task Statistics when user logs in
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    fetchTaskStats();
+  }, [isAuthenticated]);
+  if (!isLoaded || authLoading || (isAuthenticated && backendTasksLoading)) {
     return (
       <View style={styles.container}>
-        <Text>Loading Tasks...</Text>
+        <Text>Loading TaskFlow...</Text>
       </View>
+    );
+  }
+  if (!isAuthenticated) {
+    if (showRegister) {
+      return (
+        <RegisterScreen
+          onRegisterSuccess={(user) => {
+            setCurrentUser(user);
+            setIsAuthenticated(true);
+            setShowRegister(false);
+          }}
+          onShowLogin={() => setShowRegister(false)}
+        />
+      );
+    }
+
+    return (
+      <LoginScreen
+        onLoginSuccess={(user) => {
+          setCurrentUser(user);
+          setIsAuthenticated(true);
+        }}
+        onShowRegister={() => setShowRegister(true)}
+      />
+    );
+  }
+  // Show Profile Screen
+  if (showProfile) {
+    return (
+      <ProfileScreen
+        currentUser={currentUser}
+        onBack={() => setShowProfile(false)}
+        onLogout={async () => {
+          try {
+            await logoutUser();
+            setIsAuthenticated(false);
+            setCurrentUser(null);
+            setShowProfile(false);
+          } catch (error) {
+            console.log("Logout Failed:", error.message);
+          }
+        }}
+        onSave={async (profileData) => {
+  try {
+    if (!profileData.name.trim() || !profileData.email.trim()) {
+      Alert.alert("Error", "Please enter name and email.");
+      return;
+    }
+
+    const response = await updateProfile({
+      name: profileData.name.trim(),
+      email: profileData.email.trim(),
+    });
+
+    setCurrentUser(response.user);
+
+    Alert.alert(
+      "Success",
+      "Profile updated successfully!"
+    );
+  } catch (error) {
+    Alert.alert(
+      "Update Failed",
+      error.response?.data?.message || "Unable to update profile."
+    );
+  }
+}}
+onChangePassword={async (passwordData) => {
+  try {
+    if (
+      !passwordData.currentPassword ||
+      !passwordData.newPassword ||
+      !passwordData.confirmPassword
+    ) {
+      Alert.alert("Error", "Please fill all password fields.");
+      return false;
+    }
+
+    if (passwordData.newPassword.length < 6) {
+      Alert.alert("Error", "Password must be at least 6 characters.");
+      return false;
+    }
+
+    if (passwordData.newPassword !== passwordData.confirmPassword) {
+      Alert.alert("Error", "New passwords do not match.");
+      return false;
+    }
+
+    const response = await changePassword({
+      currentPassword: passwordData.currentPassword,
+      newPassword: passwordData.newPassword,
+    });
+
+    Alert.alert(
+      "Success",
+      response.message || "Password changed successfully!"
+    );
+
+    return true;
+  } catch (error) {
+    Alert.alert(
+      "Password Update Failed",
+      error.response?.data?.message || "Unable to change password."
+    );
+
+    return false;
+  }
+}}
+      />
     );
   }
   return (
     <View style={styles.container}>
       <StatusBar style="dark" />
 
-      <ScrollView showsVerticalScrollIndicator={false}>
-        {/* Header */}
-        <View style={styles.header}>
-          <View>
-            <Text style={styles.logo}>TaskFlow.</Text>
-            <Text style={styles.subtitle}>Manage your day better</Text>
+      <ScrollView
+        ref={scrollViewRef}
+        contentContainerStyle={{ paddingBottom: 130 }}
+        showsVerticalScrollIndicator={false}
+      >
+        <BottomNavigation
+          styles={styles}
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          scrollViewRef={scrollViewRef}
+          tasksSectionY={tasksSectionY}
+          setShowNotificationSettings={setShowNotificationSettings}
+        />
+
+        <Header
+          styles={styles}
+          currentUser={currentUser}
+          onOpenProfile={() => setShowProfile(true)}
+        />
+     
+        <StatsCards
+          styles={styles}
+          totalTasks={taskStats.totalTasks}
+          pendingTasks={taskStats.pendingTasks}
+          completedTasks={taskStats.completedTasks}
+          overdueTasks={taskStats.overdueTasks}
+        />
+
+        {/* Productivity Progress */}
+        <View style={styles.progressCard}>
+          <View style={styles.progressHeader}>
+            <View>
+              <Text style={styles.progressTitle}>Daily Progress ✨</Text>
+              <Text style={styles.progressSubtitle}>
+                Keep going, you're doing great!
+              </Text>
+            </View>
+
+            <Text style={styles.progressPercentage}>{progressPercentage}%</Text>
           </View>
 
-          <View style={styles.profile}>
-            <Text style={styles.profileText}>J</Text>
-          </View>
-        </View>
-
-        {/* Welcome */}
-        <View style={styles.welcome}>
-          <Text style={styles.greeting}>Hello, Jiya! 👋</Text>
-          <Text style={styles.description}>Let's make today productive.</Text>
-        </View>
-
-        {/* Overview */}
-        <Text style={styles.sectionTitle}>Overview</Text>
-
-        <View style={styles.statsContainer}>
-          <View style={styles.statCard}>
-            <Text style={styles.statNumber}>{tasks.length}</Text>
-            <Text style={styles.statLabel}>Total Tasks</Text>
-          </View>
-
-          <View style={styles.statCard}>
-            <Text style={styles.statNumber}>{pendingTasks}</Text>
-            <Text style={styles.statLabel}>Pending</Text>
-          </View>
-
-          <View style={styles.statCard}>
-            <Text style={styles.statNumber}>{completedTasks}</Text>
-            <Text style={styles.statLabel}>Completed</Text>
+          <View style={styles.progressTrack}>
+            <View
+              style={[
+                styles.progressFill,
+                {
+                  width: `${
+                    tasks.length === 0
+                      ? 0
+                      : (completedTasks / tasks.length) * 100
+                  }%`,
+                },
+              ]}
+            />
           </View>
         </View>
 
         {/* Task heading */}
-        <View style={styles.taskHeader}>
-          <Text style={styles.sectionTitle}>Today's Tasks</Text>
-          <Text style={styles.taskCount}>{tasks.length} tasks</Text>
+        {/* Today's Tasks Heading */}
+        <View
+          style={styles.taskHeader}
+          onLayout={(event) => setTasksSectionY(event.nativeEvent.layout.y)}
+        >
+          <View style={styles.taskHeaderContent}>
+            <Text style={styles.sectionTitle}>My Tasks</Text>
+
+            <Text style={styles.taskSubtitle}>
+              Manage your daily activities
+            </Text>
+          </View>
+
+          <View style={styles.taskCountBadge}>
+            <Text style={styles.taskCount}>{sortedTasks.length} Tasks</Text>
+          </View>
         </View>
-        <TextInput
-          style={styles.searchInput}
-          placeholder="Search tasks..."
-          value={searchText}
-          onChangeText={setSearchText}
-        />
+
+        <View style={styles.searchContainer}>
+          <Text style={styles.searchIcon}>⌕</Text>
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Search your tasks..."
+            placeholderTextColor="#A29DB2"
+            value={searchText}
+            onChangeText={setSearchText}
+          />
+          {searchText.length > 0 && (
+            <Pressable onPress={() => setSearchText("")}>
+              <Text style={styles.clearSearch}>×</Text>
+            </Pressable>
+          )}
+        </View>
+
+        {/* Task Status Filter */}
+        <Text style={styles.filterHeading}>Task Status</Text>
+
         <View style={styles.filterRow}>
           {["All", "Pending", "Completed"].map((status) => (
             <Pressable
@@ -871,7 +1121,8 @@ useEffect(() => {
           ))}
         </View>
 
-        <Text style={styles.inputLabel}>Priority Filter</Text>
+        {/* Priority Filter */}
+        <Text style={styles.filterHeading}>Priority</Text>
 
         <View style={styles.filterRow}>
           {["All", "High", "Medium", "Low"].map((item) => (
@@ -894,390 +1145,131 @@ useEffect(() => {
             </Pressable>
           ))}
         </View>
+        {/* Clear Filters Button */}
+        <Pressable
+          style={styles.clearFiltersButton}
+          onPress={() => {
+            setSearchText("");
+            setFilterStatus("All");
+            setFilterPriority("All");
+          }}
+        >
+          <Text style={styles.clearFiltersText}>✕ Clear Filters</Text>
+        </Pressable>
+        {/* Task Sorting */}
 
-        {/* Task list */}
-        {filteredTasks.map((task) => (
-          <View key={task.id} style={styles.taskCard}>
-            <Pressable
-              style={styles.taskInfo}
-              onPress={() => toggleTask(task.id)}
-            >
-              <Text
+        <View style={styles.sortContainer}>
+          <Text style={styles.sortLabel}>Sort By</Text>
+
+          <View style={styles.sortOptions}>
+            {["Due Date", "Priority", "Newest First"].map((option) => (
+              <Pressable
+                key={option}
+                onPress={() => setSortBy(option)}
                 style={[
-                  styles.taskTitle,
-                  task.completed && styles.completedText,
+                  styles.sortButton,
+                  sortBy === option && styles.activeSortButton,
                 ]}
               >
-                {task.completed ? "✓ " : "○ "}
-                {task.title}
-              </Text>
-
-              <Text style={styles.taskTime}>{task.time}</Text>
-            </Pressable>
-
-            <View style={styles.taskActions}>
-              <Text style={styles.priority}>{task.priority}</Text>
-              <View style={styles.actionButtons}>
-                <Pressable
-                  onPress={() => editTask(task.id)}
-                  style={styles.editButton}
+                <Text
+                  style={[
+                    styles.sortText,
+                    sortBy === option && styles.activeSortText,
+                  ]}
                 >
-                  <Text style={{ color: "#6654D9" }}>Edit</Text>
-                </Pressable>
-
-                <Pressable
-                  onPress={() => deleteTask(task.id)}
-                  style={styles.deleteButton}
-                >
-                  <Text style={styles.deleteText}>×</Text>
-                </Pressable>
-              </View>
-            </View>
+                  {option}
+                </Text>
+              </Pressable>
+            ))}
           </View>
+        </View>
+        {/* Premium Task List */}
+
+        {sortedTasks.map((task) => (
+          <TaskCard
+            key={task.id}
+            task={task}
+            styles={styles}
+            onToggle={toggleTask}
+            onEdit={editTask}
+            onDelete={deleteTask}
+          />
         ))}
-        {filteredTasks.length === 0 && (
-          <Text style={styles.emptyText}>No tasks found!</Text>
+
+        {sortedTasks.length === 0 && (
+          <Text style={styles.emptyText}>No tasks found! ✨</Text>
         )}
 
         {/* Add button */}
-        <Pressable
-          style={styles.addButton}
-          onPress={() => setModalVisible(true)}
-        >
-          <Text style={styles.addButtonText}>+ Add New Task</Text>
-        </Pressable>
-        <Pressable
-  style={styles.addButton}
-  onPress={() => setShowHistory(true)}
->
-  <Text style={styles.addButtonText}>
-    🔔 Notification History ({notificationHistory.length})
-  </Text>
-</Pressable>
-        <Pressable
-          style={styles.addButton}
-          onPress={checkScheduledNotifications}
-        >
-          <Text style={styles.addButtonText}>📋 Check Scheduled Reminders</Text>
-        </Pressable>
 
+        {/* Floating Add Task Button */}
         <Pressable
-          style={styles.addButton}
-          onPress={toggleNotificationSettings}
-        >
-          <Text style={styles.addButtonText}>
-            🔔 Notifications: {notificationsEnabled ? "ON" : "OFF"}
-          </Text>
-        </Pressable>
+          style={styles.fab}
+          onPress={() => {
+            setEditingTaskId(null);
+            setTaskTitle("");
+            setPriority("Medium");
+            setSelectedDate(new Date());
 
-        <Pressable style={styles.addButton} onPress={sendTestNotification}>
-          <Text style={styles.addButtonText}>🔔 Test Notification</Text>
-        </Pressable>
-        <Pressable
-  style={styles.addButton}
-  onPress={checkNotificationChannels}
->
-  <Text style={styles.addButtonText}>
-    Check Android Channels
-  </Text>
-</Pressable>
-        <Pressable
-          style={styles.addButton}
-          onPress={() => setShowNotificationSettings(true)}
+            const nextHour = new Date();
+            nextHour.setHours(nextHour.getHours() + 1, 0, 0, 0);
+            setSelectedTime(nextHour);
+
+            setModalVisible(true);
+          }}
         >
-          <Text style={styles.addButtonText}>⚙️ Notification Settings</Text>
+          <Text style={styles.fabText}>＋</Text>
         </Pressable>
       </ScrollView>
 
-      {/* Add Task Modal */}
-      <Modal
-        visible={modalVisible}
-        transparent={true}
-        animationType="slide"
-        onRequestClose={() => setModalVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Create New Task</Text>
+      <AddTaskModal
+        styles={styles}
+        modalVisible={modalVisible}
+        setModalVisible={setModalVisible}
+        taskTitle={taskTitle}
+        setTaskTitle={setTaskTitle}
+        priority={priority}
+        setPriority={setPriority}
+        selectedDate={selectedDate}
+        selectedTime={selectedTime}
+        showDatePicker={showDatePicker}
+        setShowDatePicker={setShowDatePicker}
+        showTimePicker={showTimePicker}
+        setShowTimePicker={setShowTimePicker}
+        handleDateChange={handleDateChange}
+        handleTimeChange={handleTimeChange}
+        editingTaskId={editingTaskId}
+        setEditingTaskId={setEditingTaskId}
+        updateTask={updateTask}
+        addTask={addTask}
+      />
 
-            <Text style={styles.inputLabel}>Task Title</Text>
-
-            <TextInput
-              style={styles.input}
-              placeholder="Enter your task"
-              value={taskTitle}
-              onChangeText={setTaskTitle}
-            />
-
-            <Text style={styles.inputLabel}>Select Priority</Text>
-
-            <View style={styles.priorityOptions}>
-              {["Low", "Medium", "High"].map((item) => (
-                <Pressable
-                  key={item}
-                  style={[
-                    styles.priorityOption,
-                    priority === item && styles.selectedPriority,
-                  ]}
-                  onPress={() => setPriority(item)}
-                >
-                  <Text
-                    style={[
-                      styles.priorityOptionText,
-                      priority === item && styles.selectedPriorityText,
-                    ]}
-                  >
-                    {item}
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
-            <Text style={styles.inputLabel}>Select Due Date</Text>
-
-            <Pressable
-              style={styles.dateButton}
-              onPress={() => setShowDatePicker(true)}
-            >
-              <Text style={styles.dateButtonText}>
-                📅 {selectedDate.toLocaleDateString()}
-              </Text>
-            </Pressable>
-
-            {showDatePicker && (
-              <DateTimePicker
-                value={selectedDate}
-                mode="date"
-                display="default"
-                minimumDate={new Date()}
-                onChange={handleDateChange}
-              />
-            )}
-
-            <Text style={styles.inputLabel}>Select Reminder Time</Text>
-
-            <Pressable
-              style={styles.dateButton}
-              onPress={() => setShowTimePicker(true)}
-            >
-              <Text style={styles.dateButtonText}>
-                🕒{" "}
-                {selectedTime.toLocaleTimeString([], {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}
-              </Text>
-            </Pressable>
-
-           
-{showTimePicker && (
-  <DateTimePicker
-    value={selectedTime}
-    mode="time"
-    display="clock"
-    is24Hour={false}
-    onChange={handleTimeChange}
-  />
-)}
-
-
-            <Pressable
-              style={styles.saveButton}
-              onPress={editingTaskId ? updateTask : addTask}
-            >
-              <Text style={styles.addButtonText}>
-                {editingTaskId ? "Update Task" : "Save Task"}
-              </Text>
-            </Pressable>
-
-            <Pressable
-              onPress={() => {
-                setModalVisible(false);
-                setTaskTitle("");
-                setPriority("Medium");
-                setEditingTaskId(null);
-              }}
-            >
-              <Text style={styles.cancelText}>Cancel</Text>
-            </Pressable>
-          </View>
-        </View>
-      </Modal>
-
-      {/* Notification Settings Modal */}
-      <Modal
+      <NotificationSettings
+        styles={styles}
         visible={showNotificationSettings}
-        transparent={true}
-        animationType="slide"
-        onRequestClose={() => setShowNotificationSettings(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>⚙️ Notification Settings</Text>
-
-            {/* Main Notifications */}
-            <View style={styles.settingRow}>
-              <View style={styles.settingInfo}>
-                <Text style={styles.settingTitle}>Notifications</Text>
-                <Text style={styles.settingDescription}>
-                  Enable or disable all task reminders
-                </Text>
-              </View>
-
-              <Pressable
-                style={[
-                  styles.toggleButton,
-                  notificationsEnabled && styles.toggleActive,
-                ]}
-                onPress={toggleNotificationSettings}
-              >
-                <Text style={styles.toggleText}>
-                  {notificationsEnabled ? "ON" : "OFF"}
-                </Text>
-              </Pressable>
-            </View>
-
-            {/* Sound */}
-            <View style={styles.settingRow}>
-              <View style={styles.settingInfo}>
-                <Text style={styles.settingTitle}>Notification Sound 🔊</Text>
-                <Text style={styles.settingDescription}>
-                  Play sound with reminders
-                </Text>
-              </View>
-
-              <Pressable
-                style={[
-                  styles.toggleButton,
-                  soundEnabled && styles.toggleActive,
-                ]}
-                onPress={() =>
-  updateSoundVibrationSettings(
-    !soundEnabled,
-    vibrationEnabled
-  )
-}
-              >
-                <Text style={styles.toggleText}>
-                  {soundEnabled ? "ON" : "OFF"}
-                </Text>
-              </Pressable>
-            </View>
-
-            {/* Vibration */}
-            <View style={styles.settingRow}>
-              <View style={styles.settingInfo}>
-                <Text style={styles.settingTitle}>Vibration 📳</Text>
-                <Text style={styles.settingDescription}>
-                  Vibrate when reminder arrives
-                </Text>
-              </View>
-
-              <Pressable
-                style={[
-                  styles.toggleButton,
-                  vibrationEnabled && styles.toggleActive,
-                ]}
-                onPress={() =>
-  updateSoundVibrationSettings(
-    soundEnabled,
-    !vibrationEnabled
-  )
-}
-              >
-                <Text style={styles.toggleText}>
-                  {vibrationEnabled ? "ON" : "OFF"}
-                </Text>
-              </Pressable>
-            </View>
-
-            {/* Check Reminders */}
-            <Pressable
-              style={styles.saveButton}
-              onPress={checkScheduledNotifications}
-            >
-              <Text style={styles.addButtonText}>
-                📋 Check Scheduled Reminders
-              </Text>
-            </Pressable>
-
-            {/* Close */}
-            <Pressable onPress={() => setShowNotificationSettings(false)}>
-              <Text style={styles.cancelText}>Close Settings</Text>
-            </Pressable>
-          </View>
-        </View>
-      </Modal>
-
-<Modal
-  visible={showHistory}
-  transparent={true}
-  animationType="slide"
-  onRequestClose={() => setShowHistory(false)}
->
-  <View style={styles.modalOverlay}>
-    <View style={styles.modalContent}>
-      <Text style={styles.modalTitle}>
-        🔔 Notification History
-      </Text>
-
-      <ScrollView style={{ maxHeight: 400 }}>
-        {notificationHistory.length === 0 ? (
-          <Text style={styles.emptyText}>
-            No notification history yet!
-          </Text>
-        ) : (
-          notificationHistory.map((item) => (
-            <View
-              key={item.id}
-              style={styles.taskCard}
-            >
-              <View style={{ flex: 1 }}>
-                <Text style={styles.settingTitle}>
-                  {item.title}
-                </Text>
-
-                <Text style={styles.settingDescription}>
-                  {item.body}
-                </Text>
-
-                <Text style={styles.taskTime}>
-                  {new Date(item.receivedAt).toLocaleString()}
-                </Text>
-              </View>
-            </View>
-          ))
-        )}
-      </ScrollView>
-
-      <Pressable
-        style={styles.saveButton}
-        onPress={() => {
-          Alert.alert(
-            "Clear History",
-            "Are you sure you want to delete all notification history?",
-            [
-              { text: "Cancel", style: "cancel" },
-              {
-                text: "Clear",
-                style: "destructive",
-                onPress: () => setNotificationHistory([]),
-              },
-            ]
-          );
+        onClose={() => {
+          setShowNotificationSettings(false);
+          setActiveTab("Home");
         }}
-      >
-        <Text style={styles.addButtonText}>
-          Clear History
-        </Text>
-      </Pressable>
+        notificationsEnabled={notificationsEnabled}
+        toggleNotificationSettings={toggleNotificationSettings}
+        soundEnabled={soundEnabled}
+        vibrationEnabled={vibrationEnabled}
+        updateSoundVibrationSettings={updateSoundVibrationSettings}
+        checkScheduledNotifications={checkScheduledNotifications}
+        onViewHistory={() => {
+          setShowNotificationSettings(false);
+          setShowHistory(true);
+        }}
+      />
 
-      <Pressable onPress={() => setShowHistory(false)}>
-        <Text style={styles.cancelText}>Close</Text>
-      </Pressable>
-    </View>
-  </View>
-</Modal>
-
+      <NotificationHistory
+        styles={styles}
+        visible={showHistory}
+        onClose={() => setShowHistory(false)}
+        notificationHistory={notificationHistory}
+        setNotificationHistory={setNotificationHistory}
+      />
     </View>
   );
 }
@@ -1295,50 +1287,74 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 30,
+    marginBottom: 32,
   },
 
   logo: {
-    fontSize: 27,
-    fontWeight: "bold",
+    fontSize: 32,
+    fontWeight: "900",
     color: "#6654D9",
+    letterSpacing: -1,
   },
 
   subtitle: {
-    fontSize: 13,
-    color: "#888",
-    marginTop: 4,
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 2,
+    color: "#9993B8",
+    marginTop: 5,
   },
 
   profile: {
-    width: 45,
-    height: 45,
-    borderRadius: 25,
-    backgroundColor: "#E5DFFF",
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    backgroundColor: "#E9E3FF",
     justifyContent: "center",
     alignItems: "center",
+    borderWidth: 2,
+    borderColor: "#FFFFFF",
   },
 
   profileText: {
-    fontSize: 20,
+    fontSize: 23,
     fontWeight: "bold",
     color: "#6654D9",
   },
 
+  onlineDot: {
+    position: "absolute",
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: "#35C98A",
+    right: 1,
+    bottom: 2,
+    borderWidth: 2,
+    borderColor: "#FFFFFF",
+  },
+
   welcome: {
-    marginBottom: 30,
+    marginBottom: 32,
+  },
+
+  dateText: {
+    fontSize: 13,
+    color: "#8B83A8",
+    fontWeight: "600",
+    marginBottom: 10,
   },
 
   greeting: {
-    fontSize: 25,
-    fontWeight: "bold",
-    color: "#222",
+    fontSize: 29,
+    fontWeight: "900",
+    color: "#25213A",
   },
 
   description: {
-    fontSize: 14,
-    color: "#888",
-    marginTop: 8,
+    fontSize: 15,
+    color: "#89869A",
+    marginTop: 9,
   },
 
   sectionTitle: {
@@ -1348,63 +1364,212 @@ const styles = StyleSheet.create({
     marginBottom: 15,
   },
 
+  overviewHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 14,
+  },
+
+  overviewSubtitle: {
+    color: "#9993B8",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+
   statsContainer: {
     flexDirection: "row",
-    gap: 10,
-    marginBottom: 30,
+    gap: 9,
+    marginBottom: 16,
   },
 
   statCard: {
     flex: 1,
-    backgroundColor: "#FFFFFF",
-    paddingVertical: 20,
-    borderRadius: 15,
+    paddingVertical: 16,
+    paddingHorizontal: 5,
+    borderRadius: 18,
     alignItems: "center",
-    elevation: 2,
+    borderWidth: 1,
+    borderColor: "#FFFFFF",
+  },
+
+  totalCard: {
+    backgroundColor: "#EEE9FF",
+  },
+
+  pendingCard: {
+    backgroundColor: "#FFF1DC",
+  },
+
+  completedCard: {
+    backgroundColor: "#E2F8EE",
+  },
+
+  statIcon: {
+    fontSize: 21,
+    marginBottom: 7,
   },
 
   statNumber: {
-    fontSize: 25,
-    fontWeight: "bold",
+    fontSize: 27,
+    fontWeight: "900",
     color: "#6654D9",
   },
 
   statLabel: {
     fontSize: 11,
-    color: "#777",
-    marginTop: 7,
+    color: "#77718A",
+    marginTop: 5,
+    fontWeight: "600",
+  },
+
+  progressCard: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 18,
+    padding: 17,
+    marginBottom: 28,
+    elevation: 2,
+    shadowColor: "#6654D9",
+    shadowOpacity: 0.07,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+  },
+
+  progressHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 14,
+  },
+
+  progressTitle: {
+    fontSize: 15,
+    fontWeight: "bold",
+    color: "#29243D",
+  },
+
+  progressSubtitle: {
+    fontSize: 11,
+    color: "#9993A8",
+    marginTop: 5,
+  },
+
+  progressPercentage: {
+    fontSize: 22,
+    fontWeight: "900",
+    color: "#6654D9",
+  },
+
+  progressTrack: {
+    height: 9,
+    backgroundColor: "#F0EDFA",
+    borderRadius: 10,
+    overflow: "hidden",
+  },
+
+  progressFill: {
+    height: 9,
+    backgroundColor: "#7159DF",
+    borderRadius: 10,
   },
 
   taskHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
+    width: "100%",
+    marginBottom: 20,
+  },
+
+  taskHeaderContent: {
+    flex: 1,
+    alignItems: "flex-start",
+  },
+
+  sectionTitle: {
+    fontSize: 28,
+    fontWeight: "bold",
+    color: "#1F1F2E", // Dark heading
+    textAlign: "left",
+  },
+
+  taskSubtitle: {
+    fontSize: 16,
+    color: "#9996A8", // Light grey text
+    marginTop: 8,
+    textAlign: "left",
+  },
+
+  taskCountBadge: {
+    backgroundColor: "#EEE9FF",
+    paddingHorizontal: 13,
+    paddingVertical: 8,
+    borderRadius: 20,
   },
 
   taskCount: {
-    color: "#888",
+    color: "#6654D9",
     fontSize: 12,
+    fontWeight: "800",
   },
-
   taskCard: {
     backgroundColor: "#FFFFFF",
-    padding: 17,
-    borderRadius: 14,
-    marginBottom: 12,
+    padding: 16,
+    borderRadius: 18,
+    marginBottom: 13,
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    elevation: 1,
+    borderWidth: 1,
+    borderColor: "#EEEAF8",
+    elevation: 2,
+    shadowColor: "#6654D9",
+    shadowOpacity: 0.05,
+    shadowRadius: 7,
+    shadowOffset: { width: 0, height: 3 },
+  },
+
+  completedTaskCard: {
+    backgroundColor: "#F8F7FC",
   },
 
   taskInfo: {
     flex: 1,
+    paddingRight: 8,
+  },
+
+  taskTitleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 9,
+  },
+
+  taskCheckbox: {
+    width: 21,
+    height: 21,
+    borderRadius: 7,
+    borderWidth: 1.5,
+    borderColor: "#A99AE8",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  checkedCheckbox: {
+    backgroundColor: "#6654D9",
+    borderColor: "#6654D9",
+  },
+
+  checkmark: {
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontWeight: "bold",
   },
 
   taskTitle: {
+    flex: 1,
     fontSize: 14,
-    fontWeight: "600",
-    color: "#333",
+    fontWeight: "700",
+    color: "#302B43",
   },
 
   completedText: {
@@ -1413,27 +1578,71 @@ const styles = StyleSheet.create({
   },
 
   taskTime: {
-    fontSize: 12,
-    color: "#999",
-    marginTop: 8,
+    fontSize: 11,
+    color: "#9993AA",
+    marginTop: 9,
+    marginLeft: 30,
   },
 
   taskActions: {
+    alignItems: "flex-end",
+    gap: 10,
+  },
+
+  priority: {
+    fontSize: 10,
+    fontWeight: "700",
+    paddingHorizontal: 11,
+    paddingVertical: 6,
+    borderRadius: 9,
+    overflow: "hidden",
+  },
+
+  highPriority: {
+    color: "#D64D5A",
+    backgroundColor: "#FFE7E9",
+  },
+
+  mediumPriority: {
+    color: "#B47A20",
+    backgroundColor: "#FFF1D8",
+  },
+
+  lowPriority: {
+    color: "#26946B",
+    backgroundColor: "#E2F8ED",
+  },
+
+  actionButtons: {
+    flexDirection: "row",
     alignItems: "center",
     gap: 8,
   },
 
-  priority: {
-    fontSize: 11,
+  editButton: {
+    backgroundColor: "#F0EDFF",
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+
+  editText: {
     color: "#6654D9",
-    backgroundColor: "#EEEAFE",
-    padding: 8,
-    borderRadius: 8,
+    fontSize: 20,
   },
 
   deleteButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 2,
+    width: 30,
+    height: 34,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+
+  deleteText: {
+    color: "#E05252",
+    fontSize: 24,
   },
 
   deleteText: {
@@ -1458,52 +1667,60 @@ const styles = StyleSheet.create({
 
   modalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.45)",
+    backgroundColor: "rgba(30, 23, 55, 0.55)",
     justifyContent: "center",
-    padding: 20,
+    padding: 18,
   },
 
   modalContent: {
     backgroundColor: "#FFFFFF",
-    padding: 24,
-    borderRadius: 20,
+    padding: 22,
+    borderRadius: 25,
+    elevation: 10,
+    shadowColor: "#000",
+    shadowOpacity: 0.15,
+    shadowRadius: 15,
+    shadowOffset: { width: 0, height: 5 },
   },
 
   modalTitle: {
-    fontSize: 22,
-    fontWeight: "bold",
-    color: "#222",
-    marginBottom: 25,
+    fontSize: 23,
+    fontWeight: "900",
+    color: "#29243D",
+    marginBottom: 22,
   },
 
   inputLabel: {
-    fontSize: 14,
-    fontWeight: "600",
-    marginBottom: 10,
-    color: "#444",
+    fontSize: 13,
+    fontWeight: "700",
+    marginBottom: 9,
+    color: "#514B65",
   },
 
   input: {
     borderWidth: 1,
-    borderColor: "#DDD",
-    borderRadius: 10,
-    padding: 13,
-    marginBottom: 22,
+    borderColor: "#E8E3F2",
+    backgroundColor: "#FAF9FE",
+    borderRadius: 13,
+    padding: 14,
+    marginBottom: 20,
     fontSize: 15,
+    color: "#302B43",
   },
 
   priorityOptions: {
     flexDirection: "row",
     gap: 10,
-    marginBottom: 25,
+    marginBottom: 22,
   },
 
   priorityOption: {
     flex: 1,
     padding: 12,
     borderWidth: 1,
-    borderColor: "#DDD",
-    borderRadius: 10,
+    borderColor: "#E5E0F0",
+    backgroundColor: "#FAF9FE",
+    borderRadius: 12,
     alignItems: "center",
   },
 
@@ -1523,9 +1740,15 @@ const styles = StyleSheet.create({
 
   saveButton: {
     backgroundColor: "#6654D9",
-    padding: 15,
-    borderRadius: 10,
+    padding: 16,
+    borderRadius: 14,
     alignItems: "center",
+    marginTop: 8,
+    elevation: 3,
+    shadowColor: "#6654D9",
+    shadowOpacity: 0.2,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 3 },
   },
 
   cancelText: {
@@ -1546,35 +1769,71 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 8,
   },
-  searchInput: {
+
+  searchContainer: {
+    flexDirection: "row",
+    alignItems: "center",
     backgroundColor: "#FFFFFF",
-    padding: 14,
-    borderRadius: 10,
-    marginVertical: 12,
+    borderRadius: 15,
+    paddingHorizontal: 14,
+    marginVertical: 14,
     borderWidth: 1,
-    borderColor: "#E5E5EF",
+    borderColor: "#EAE6F5",
+    elevation: 1,
+  },
+
+  searchIcon: {
+    fontSize: 25,
+    color: "#8273D5",
+    marginRight: 9,
+  },
+
+  searchInput: {
+    flex: 1,
+    paddingVertical: 15,
+    fontSize: 14,
+    color: "#302B43",
+  },
+
+  clearSearch: {
+    fontSize: 23,
+    color: "#9993AA",
+    paddingHorizontal: 5,
+  },
+
+  filterHeading: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#39334D",
+    marginTop: 12,
+    marginBottom: 10,
   },
 
   filterRow: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 8,
+    gap: 9,
     marginBottom: 12,
   },
 
   filterButton: {
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    borderRadius: 20,
-    backgroundColor: "#EEEEF5",
+    paddingHorizontal: 17,
+    paddingVertical: 10,
+    borderRadius: 25,
+    backgroundColor: "#ECEBF3",
+    borderWidth: 1,
+    borderColor: "#ECEBF3",
   },
 
   activeFilterButton: {
     backgroundColor: "#6654D9",
+    borderColor: "#6654D9",
   },
 
   filterText: {
-    color: "#333333",
+    color: "#625D70",
+    fontSize: 13,
+    fontWeight: "600",
   },
 
   activeFilterText: {
@@ -1604,9 +1863,12 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: "#EEEEF5",
+    padding: 15,
+    backgroundColor: "#F8F6FF",
+    borderRadius: 15,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: "#EEEAF8",
   },
 
   settingInfo: {
@@ -1615,14 +1877,14 @@ const styles = StyleSheet.create({
   },
 
   settingTitle: {
-    fontSize: 15,
-    fontWeight: "bold",
-    color: "#333",
+    fontSize: 14,
+    fontWeight: "800",
+    color: "#302B43",
   },
 
   settingDescription: {
     fontSize: 11,
-    color: "#888",
+    color: "#928CA5",
     marginTop: 5,
   },
 
@@ -1643,5 +1905,176 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontWeight: "bold",
     fontSize: 12,
+  },
+  settingsModalContent: {
+    backgroundColor: "#FFFFFF",
+    padding: 22,
+    borderRadius: 25,
+    elevation: 10,
+    shadowColor: "#6654D9",
+    shadowOpacity: 0.15,
+    shadowRadius: 15,
+    shadowOffset: { width: 0, height: 5 },
+  },
+
+  settingsFooter: {
+    textAlign: "center",
+    color: "#A29DB2",
+    fontSize: 11,
+    marginTop: 18,
+    fontWeight: "600",
+  },
+  secondaryActionButton: {
+    backgroundColor: "#F0EDFF",
+    padding: 15,
+    borderRadius: 14,
+    alignItems: "center",
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: "#E3DDFB",
+  },
+
+  secondaryActionText: {
+    color: "#6654D9",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  fab: {
+    position: "absolute",
+    right: 22,
+    bottom: 95,
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: "#6654D9",
+    justifyContent: "center",
+    alignItems: "center",
+    elevation: 8,
+    shadowColor: "#6654D9",
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+  },
+
+  fabText: {
+    color: "#FFFFFF",
+    fontSize: 34,
+    fontWeight: "400",
+    marginTop: -3,
+  },
+  bottomNav: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 75,
+    backgroundColor: "#FFFFFF",
+    flexDirection: "row",
+    justifyContent: "space-around",
+    alignItems: "center",
+    borderTopWidth: 1,
+    borderTopColor: "#EEEAF8",
+    elevation: 12,
+  },
+
+  navItem: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  navIcon: {
+    fontSize: 23,
+    color: "#A29DB2",
+    marginBottom: 3,
+  },
+
+  navLabel: {
+    fontSize: 11,
+    color: "#A29DB2",
+    fontWeight: "600",
+  },
+
+  activeNavText: {
+    color: "#6654D9",
+    fontWeight: "900",
+  },
+  sortContainer: {
+    marginTop: 12,
+    marginBottom: 18,
+  },
+
+  sortLabel: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: "#39334D",
+    marginBottom: 10,
+  },
+
+  sortOptions: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+
+  sortButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 12,
+    backgroundColor: "#F0EDFA",
+    borderWidth: 1,
+    borderColor: "#E8E3F5",
+  },
+
+  activeSortButton: {
+    backgroundColor: "#6654D9",
+    borderColor: "#6654D9",
+  },
+
+  sortText: {
+    fontSize: 11,
+    color: "#625D70",
+    fontWeight: "600",
+  },
+
+  activeSortText: {
+    color: "#FFFFFF",
+    fontWeight: "800",
+  },
+  dueDateText: {
+    fontSize: 11,
+    color: "#8273D5",
+    marginTop: 6,
+    marginLeft: 30,
+    fontWeight: "600",
+  },
+  overdueText: {
+    fontSize: 11,
+    color: "#D64D5A",
+    marginTop: 5,
+    marginLeft: 30,
+    fontWeight: "800",
+  },
+  completedAtText: {
+    fontSize: 11,
+    color: "#26946B",
+    marginTop: 6,
+    marginLeft: 30,
+    fontWeight: "700",
+  },
+  clearFiltersButton: {
+    alignSelf: "flex-end",
+    marginTop: 10,
+    marginBottom: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    backgroundColor: "#FFE8E8",
+    borderRadius: 8,
+  },
+
+  clearFiltersText: {
+    color: "#D32F2F",
+    fontSize: 14,
+    fontWeight: "600",
   },
 });
